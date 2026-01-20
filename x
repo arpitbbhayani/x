@@ -26,6 +26,7 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo "  x converts natural language instructions into shell commands."
     echo "  It supports OpenAI, Anthropic, and Gemini API providers."
     echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY"
+    echo "  If no API key is set, falls back to free Pollinations.ai provider."
     exit 0
 fi
 
@@ -95,8 +96,8 @@ elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
 elif [ -n "${GEMINI_API_KEY:-}" ]; then
     API_PROVIDER="gemini"
 else
-    echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY"
-    exit 1
+    # Fallback to free Pollinations.ai provider (no API key required)
+    API_PROVIDER="pollinations"
 fi
 
 # Set default models if not configured
@@ -328,6 +329,35 @@ EOF
             break
         fi
     done
+
+elif [ "$API_PROVIDER" = "pollinations" ]; then
+    # Free fallback provider - no API key required
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Using free Pollinations.ai provider (no API key)" >&2
+
+    # URL-encode the prompt
+    ENCODED_PROMPT=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$PROMPT_TEXT'''))" 2>/dev/null)
+    if [ -z "$ENCODED_PROMPT" ]; then
+        # Fallback: basic URL encoding using sed
+        ENCODED_PROMPT=$(echo "$PROMPT_TEXT" | sed 's/ /%20/g; s/\n/%0A/g; s/:/%3A/g; s/\//%2F/g; s/?/%3F/g; s/&/%26/g; s/=/%3D/g')
+    fi
+
+    POLLINATIONS_URL="https://text.pollinations.ai/${ENCODED_PROMPT}"
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Sending request to Pollinations.ai..." >&2
+
+    if [ "$HTTP_CLIENT" = "curl" ]; then
+        RESPONSE=$(curl -s "$POLLINATIONS_URL")
+    else
+        RESPONSE=$(wget -q -O- "$POLLINATIONS_URL")
+    fi
+
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
+
+    # Pollinations returns plain text, extract the command
+    # Clean up any markdown code blocks or extra formatting
+    COMMAND=$(echo "$RESPONSE" | sed 's/^```[a-z]*//g; s/```$//g; s/^`//g; s/`$//g' | grep -v '^$' | head -1)
+
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Extracted command: $COMMAND" >&2
 fi
 
 if [ -z "$COMMAND" ]; then
