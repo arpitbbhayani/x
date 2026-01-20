@@ -24,8 +24,8 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo ""
     echo "Description:"
     echo "  x converts natural language instructions into shell commands."
-    echo "  It supports OpenAI, Anthropic, and Gemini API providers."
-    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY"
+    echo "  It supports OpenAI, Anthropic, Gemini, and OLLAMA (local) providers."
+    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or OLLAMA_MODEL"
     exit 0
 fi
 
@@ -87,15 +87,22 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 # Detect which API key is available
+# Prioritize OLLAMA if explicitly set (local, no rate limits)
 API_PROVIDER=""
-if [ -n "${OPENAI_API_KEY:-}" ]; then
+if [ -n "${OLLAMA_MODEL:-}" ]; then
+    API_PROVIDER="ollama"
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
     API_PROVIDER="openai"
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     API_PROVIDER="anthropic"
 elif [ -n "${GEMINI_API_KEY:-}" ]; then
     API_PROVIDER="gemini"
+elif command -v ollama &> /dev/null; then
+    # Fallback to OLLAMA if installed but no model specified
+    API_PROVIDER="ollama"
 else
     echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY"
+    echo "Or install OLLAMA locally and set OLLAMA_MODEL (defaults to llama3.2)"
     exit 1
 fi
 
@@ -108,6 +115,13 @@ if [ "$API_PROVIDER" = "anthropic" ] && [ -z "${ANTHROPIC_MODEL:-}" ]; then
 fi
 if [ "$API_PROVIDER" = "gemini" ] && [ -z "${GEMINI_MODEL:-}" ]; then
     GEMINI_MODEL="gemini-2.0-flash-exp"
+fi
+if [ "$API_PROVIDER" = "ollama" ]; then
+    # Set default endpoint and model
+    OLLAMA_ENDPOINT="${OLLAMA_ENDPOINT:-http://localhost:11434}"
+    if [ -z "${OLLAMA_MODEL:-}" ]; then
+        OLLAMA_MODEL="llama3.2"
+    fi
 fi
 
 # Check if instruction is provided
@@ -328,6 +342,56 @@ EOF
             break
         fi
     done
+
+elif [ "$API_PROVIDER" = "ollama" ]; then
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Using OLLAMA model: $OLLAMA_MODEL" >&2
+    JSON_PAYLOAD=$(cat <<EOF
+{
+  "model": "$OLLAMA_MODEL",
+  "messages": [{"role": "user", "content": "PROMPT_PLACEHOLDER"}],
+  "stream": false,
+  "options": {
+    "temperature": 0.1,
+    "num_predict": 500
+  }
+}
+EOF
+)
+    JSON_PAYLOAD="${JSON_PAYLOAD//PROMPT_PLACEHOLDER/$PROMPT_TEXT}"
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Sending request to OLLAMA at $OLLAMA_ENDPOINT..." >&2
+    
+    if [ "$HTTP_CLIENT" = "curl" ]; then
+        RESPONSE=$(curl -s -X POST "${OLLAMA_ENDPOINT}/api/chat" \
+            -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD")
+    else
+        RESPONSE=$(wget -q -O- \
+            --method=POST \
+            --header="Content-Type: application/json" \
+            --body-data="$JSON_PAYLOAD" \
+            "${OLLAMA_ENDPOINT}/api/chat")
+    fi
+    
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
+    
+    # Check for errors
+    if echo "$RESPONSE" | grep -q '"error"'; then
+        echo "Error: OLLAMA API request failed"
+        echo "$RESPONSE"
+        echo ""
+        echo "Make sure OLLAMA is running: ollama serve"
+        echo "And the model is available: ollama pull $OLLAMA_MODEL"
+        exit 1
+    fi
+    
+    if command -v python3 &> /dev/null; then
+        COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['message']['content'])" 2>/dev/null)
+    else
+        COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tail -1)
+    fi
+    
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Extracted command: $COMMAND" >&2
 fi
 
 if [ -z "$COMMAND" ]; then
