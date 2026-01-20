@@ -380,12 +380,11 @@ EOF
 
         if [ -n "$COMMAND" ]; then
             # Save working model to config
-            echo "OPENAI_MODEL=\"$MODEL\"" > "$CONFIG_FILE"
-            [[ $DEBUG -eq 1 ]] && echo "DEBUG: Saved working model: $MODEL" >&2
+            echo "LOCAL_LLM=\"$LOCAL_LLM\"" > "$CONFIG_FILE"
+            [[ $DEBUG -eq 1 ]] && echo "DEBUG: Saved working model: $LOCAL_LLM" >&2
             [[ $DEBUG -eq 1 ]] && echo "DEBUG: Extracted command: $COMMAND" >&2
             break
         fi
-    done
 fi
 
 
