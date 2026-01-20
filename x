@@ -333,7 +333,7 @@ EOF
             break
         fi
     done
-if [ "$API_PROVIDER" = "local" ]; then
+elif [ "$API_PROVIDER" = "local" ]; then
     # Try models in order of preference (cheap to cheaper)
         [[ $DEBUG -eq 1 ]] && echo "DEBUG: Trying locally running model: $LOCAL_LLM" >&2
         JSON_PAYLOAD=$(cat <<EOF
