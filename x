@@ -25,7 +25,7 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo "Description:"
     echo "  x converts natural language instructions into shell commands."
     echo "  It supports OpenAI, Anthropic, and Gemini API providers."
-    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY"
+    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY or LOCAL_LLM"
     exit 0
 fi
 
@@ -94,6 +94,8 @@ elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     API_PROVIDER="anthropic"
 elif [ -n "${GEMINI_API_KEY:-}" ]; then
     API_PROVIDER="gemini"
+elif [ -n "${LOCAL_LLM:-}" ]; then
+    API_PROVIDER="local"
 else
     echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY"
     exit 1
@@ -108,6 +110,9 @@ if [ "$API_PROVIDER" = "anthropic" ] && [ -z "${ANTHROPIC_MODEL:-}" ]; then
 fi
 if [ "$API_PROVIDER" = "gemini" ] && [ -z "${GEMINI_MODEL:-}" ]; then
     GEMINI_MODEL="gemini-2.0-flash-exp"
+fi
+if [ "$API_PROVIDER" = "local" ] && [ -z "${LOCAL_MODEL:-}" ]; then
+    LOCAL_MODEL=${LOCAL_LLM}
 fi
 
 # Check if instruction is provided
@@ -328,7 +333,61 @@ EOF
             break
         fi
     done
+if [ "$API_PROVIDER" = "local" ]; then
+    # Try models in order of preference (cheap to cheaper)
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Trying locally running model: $LOCAL_LLM" >&2
+        JSON_PAYLOAD=$(cat <<EOF
+{
+  "model": "$LOCAL_LLM",
+  "prompt": "PROMPT_PLACEHOLDER",
+}
+EOF
+)
+        JSON_PAYLOAD="${JSON_PAYLOAD//PROMPT_PLACEHOLDER/$PROMPT_TEXT}"
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Sending request to local llm..." >&2
+        if [ "$HTTP_CLIENT" = "curl" ]; then
+            RESPONSE=$(curl -s -X POST http://localhost:11434/api/generate \
+                -H "Content-Type: application/json" \
+                -d "$JSON_PAYLOAD")
+        else
+            RESPONSE=$(wget -q -O- \
+                --method=POST \
+                --header="Content-Type: application/json" \
+                --body-data="$JSON_PAYLOAD" \
+                http://localhost:11434/api/generate)
+        fi
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
+
+        # Check for model-related errors
+        if echo "$RESPONSE" | grep -q '"error"'; then
+            ERROR_MSG=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', {}).get('code', ''))" 2>/dev/null)
+            if [[ "$ERROR_MSG" == "model_not_found" ]] || echo "$RESPONSE" | grep -q "does not exist"; then
+                [[ $DEBUG -eq 1 ]] && echo "DEBUG: Model $MODEL not available, trying next..." >&2
+                continue
+            else
+                echo "Error: API request failed"
+                echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', {}).get('message', data))" 2>/dev/null || echo "$RESPONSE"
+                exit 1
+            fi
+        fi
+
+        if command -v python3 &> /dev/null; then
+            COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['choices'][0]['message']['content'])" 2>/dev/null)
+        else
+            COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        fi
+
+        if [ -n "$COMMAND" ]; then
+            # Save working model to config
+            echo "OPENAI_MODEL=\"$MODEL\"" > "$CONFIG_FILE"
+            [[ $DEBUG -eq 1 ]] && echo "DEBUG: Saved working model: $MODEL" >&2
+            [[ $DEBUG -eq 1 ]] && echo "DEBUG: Extracted command: $COMMAND" >&2
+            break
+        fi
+    done
 fi
+
 
 if [ -z "$COMMAND" ]; then
     echo "Error: Failed to generate command"
