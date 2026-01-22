@@ -24,8 +24,15 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo ""
     echo "Description:"
     echo "  x converts natural language instructions into shell commands."
-    echo "  It supports OpenAI, Anthropic, Gemini, and Ollama API providers."
-    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or OLLAMA_MODEL"
+    echo "  It supports OpenAI, Anthropic, Gemini, LM Studio, and Ollama API providers."
+    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, LMSTUDIO_MODEL, or OLLAMA_MODEL"
+echo ""
+echo "Environment variables:"
+echo "  OpenAI:      OPENAI_API_KEY, OPENAI_MODEL"
+echo "  Anthropic:   ANTHROPIC_API_KEY, ANTHROPIC_MODEL"
+echo "  Gemini:      GEMINI_API_KEY, GEMINI_MODEL"
+echo "  LM Studio:   LMSTUDIO_MODEL (required), LMSTUDIO_BASE_URL (optional, default http://localhost:1234/v1), LMSTUDIO_API_KEY (optional)"
+echo "  Ollama:      OLLAMA_MODEL, OLLAMA_HOST (optional, default http://localhost:11434)"
     exit 0
 fi
 
@@ -94,10 +101,12 @@ elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     API_PROVIDER="anthropic"
 elif [ -n "${GEMINI_API_KEY:-}" ]; then
     API_PROVIDER="gemini"
+elif [ -n "${LMSTUDIO_MODEL:-}" ]; then
+    API_PROVIDER="lmstudio"
 elif [ -n "${OLLAMA_MODEL:-}" ]; then
     API_PROVIDER="ollama"
 else
-    echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, OLLAMA_MODEL"
+    echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, LMSTUDIO_MODEL, OLLAMA_MODEL"
     exit 1
 fi
 
@@ -330,6 +339,75 @@ EOF
             break
         fi
     done
+
+elif [ "$API_PROVIDER" = "lmstudio" ]; then
+    MODEL="${LMSTUDIO_MODEL}"
+    LMSTUDIO_BASE_URL="${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}"
+
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Using LM Studio model: $MODEL at $LMSTUDIO_BASE_URL" >&2
+
+    JSON_PAYLOAD=$(cat <<EOF
+{
+  "model": "$MODEL",
+  "messages": [{"role": "user", "content": "PROMPT_PLACEHOLDER"}],
+  "temperature": 0.1,
+  "max_tokens": 500
+}
+EOF
+)
+    JSON_PAYLOAD="${JSON_PAYLOAD//PROMPT_PLACEHOLDER/$PROMPT_TEXT}"
+
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Sending request to LM Studio..." >&2
+
+    if [ "$HTTP_CLIENT" = "curl" ]; then
+        if [ -n "${LMSTUDIO_API_KEY:-}" ]; then
+            RESPONSE=$(curl -s -X POST "${LMSTUDIO_BASE_URL}/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
+                -d "$JSON_PAYLOAD")
+        else
+            RESPONSE=$(curl -s -X POST "${LMSTUDIO_BASE_URL}/chat/completions" \
+                -H "Content-Type: application/json" \
+                -d "$JSON_PAYLOAD")
+        fi
+    else
+        if [ -n "${LMSTUDIO_API_KEY:-}" ]; then
+            RESPONSE=$(wget -q -O- \
+                --method=POST \
+                --header="Content-Type: application/json" \
+                --header="Authorization: Bearer ${LMSTUDIO_API_KEY}" \
+                --body-data="$JSON_PAYLOAD" \
+                "${LMSTUDIO_BASE_URL}/chat/completions")
+        else
+            RESPONSE=$(wget -q -O- \
+                --method=POST \
+                --header="Content-Type: application/json" \
+                --body-data="$JSON_PAYLOAD" \
+                "${LMSTUDIO_BASE_URL}/chat/completions")
+        fi
+    fi
+
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
+
+    # Check for error in response
+    if echo "$RESPONSE" | grep -q '"error"'; then
+        echo "Error: API request failed"
+        echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); err = data.get('error'); print(err.get('message') if isinstance(err, dict) else (err or data))" 2>/dev/null || echo "$RESPONSE"
+        exit 1
+    fi
+
+    if command -v python3 &> /dev/null; then
+        COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['choices'][0]['message']['content'])" 2>/dev/null)
+    else
+        COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    fi
+
+    if [ -n "$COMMAND" ]; then
+        echo "LMSTUDIO_MODEL=\"$MODEL\"" > "$CONFIG_FILE"
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Saved working model: $MODEL" >&2
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Extracted command: $COMMAND" >&2
+    fi
 
 elif [ "$API_PROVIDER" = "ollama" ]; then
     MODEL="${OLLAMA_MODEL}"

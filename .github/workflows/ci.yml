@@ -1,0 +1,16 @@
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint scripts
+        run: shellcheck *.sh tests/*.sh
+      - name: Run tests
+        run: bash ./run-tests.sh
