@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Test that x --version prints the version from VERSION file
-expected=$(<"$(dirname \$0)/../VERSION")
+expected=$(<"./VERSION")
 output=$(./x --version)
 if [[ "$output" != "$expected" ]]; then
   echo "Expected: $expected"
