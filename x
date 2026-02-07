@@ -140,6 +140,8 @@ PROMPT_TEXT="You are a shell command generator. Convert the user's natural langu
 [[ $DEBUG -eq 1 ]] && echo "DEBUG: Using API provider: $API_PROVIDER" >&2
 [[ $DEBUG -eq 1 ]] && echo "DEBUG: Instruction: $INSTRUCTION" >&2
 
+COMMAND=""
+
 # Make API request based on provider
 if [ "$API_PROVIDER" = "openai" ]; then
     # Try models in order of preference (cheap to cheaper)
@@ -266,7 +268,7 @@ EOF
 
 elif [ "$API_PROVIDER" = "gemini" ]; then
     # Try models in order of preference (cheap to cheaper)
-    GEMINI_MODELS=("${GEMINI_MODEL}" "gemini-2.0-flash-exp" "gemini-1.5-flash" "gemini-pro")
+    GEMINI_MODELS=("${GEMINI_MODEL}" "gemini-3-flash-preview" "gemini-3-pro-preview")
 
     for MODEL in "${GEMINI_MODELS[@]}"; do
         [[ $DEBUG -eq 1 ]] && echo "DEBUG: Trying Gemini model: $MODEL" >&2
