@@ -3,7 +3,7 @@
 A natural language shell command executor.
 
 - No external dependencies (just `curl` or `wget`)
-- Supports OpenAI, Gemini, and Anthropic as providers
+- Supports OpenAI, Gemini, Anthropic, and Ollama as providers
 - Shows command before execution for confirmation
 - Automatically picks the best available model
 
@@ -19,6 +19,7 @@ Set your API key (choose one):
 export OPENAI_API_KEY="your-key"
 export ANTHROPIC_API_KEY="your-key"
 export GEMINI_API_KEY="your-key"
+export OLLAMA_MODEL="llama3.2"
 ```
 
 Add to your shell config (`~/.bashrc`, `~/.zshrc`, etc):

@@ -24,8 +24,8 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo ""
     echo "Description:"
     echo "  x converts natural language instructions into shell commands."
-    echo "  It supports OpenAI, Anthropic, and Gemini API providers."
-    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY"
+    echo "  It supports OpenAI, Anthropic, Gemini, and Ollama API providers."
+    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or OLLAMA_MODEL"
     exit 0
 fi
 
@@ -94,8 +94,10 @@ elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     API_PROVIDER="anthropic"
 elif [ -n "${GEMINI_API_KEY:-}" ]; then
     API_PROVIDER="gemini"
+elif [ -n "${OLLAMA_MODEL:-}" ]; then
+    API_PROVIDER="ollama"
 else
-    echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY"
+    echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, OLLAMA_MODEL"
     exit 1
 fi
 
@@ -330,6 +332,52 @@ EOF
             break
         fi
     done
+
+elif [ "$API_PROVIDER" = "ollama" ]; then
+    MODEL="${OLLAMA_MODEL}"
+    OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+    
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Using Ollama model: $MODEL at $OLLAMA_HOST" >&2
+    
+    JSON_PAYLOAD=$(cat <<EOF
+{
+  "model": "$MODEL",
+  "messages": [{"role": "user", "content": "PROMPT_PLACEHOLDER"}],
+  "stream": false
+}
+EOF
+)
+    JSON_PAYLOAD="${JSON_PAYLOAD//PROMPT_PLACEHOLDER/$PROMPT_TEXT}"
+    
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Sending request to Ollama..." >&2
+    
+    if [ "$HTTP_CLIENT" = "curl" ]; then
+        RESPONSE=$(curl -s -X POST "${OLLAMA_HOST}/api/chat" \
+            -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD")
+    else
+        RESPONSE=$(wget -q -O- \
+            --method=POST \
+            --header="Content-Type: application/json" \
+            --body-data="$JSON_PAYLOAD" \
+            "${OLLAMA_HOST}/api/chat")
+    fi
+    
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
+    [[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
+    
+    # Check for error in response
+    if echo "$RESPONSE" | grep -q '"error"'; then
+        echo "Error: API request failed"
+        echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', data))" 2>/dev/null || echo "$RESPONSE"
+        exit 1
+    fi
+    
+    if command -v python3 &> /dev/null; then
+        COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['message']['content'])" 2>/dev/null)
+    else
+        COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    fi
 fi
 
 if [ -z "$COMMAND" ]; then
