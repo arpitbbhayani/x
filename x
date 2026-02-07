@@ -24,8 +24,8 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo ""
     echo "Description:"
     echo "  x converts natural language instructions into shell commands."
-    echo "  It supports OpenAI, Anthropic, Gemini, and Ollama API providers."
-    echo "  Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or OLLAMA_MODEL"
+    echo "  It supports OpenAI, OpenRouter, Anthropic, Gemini, and Ollama API providers."
+    echo "  Set one of: OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or OLLAMA_MODEL"
     exit 0
 fi
 
@@ -90,6 +90,8 @@ fi
 API_PROVIDER=""
 if [ -n "${OPENAI_API_KEY:-}" ]; then
     API_PROVIDER="openai"
+elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+    API_PROVIDER="openrouter"
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     API_PROVIDER="anthropic"
 elif [ -n "${GEMINI_API_KEY:-}" ]; then
@@ -97,13 +99,16 @@ elif [ -n "${GEMINI_API_KEY:-}" ]; then
 elif [ -n "${OLLAMA_MODEL:-}" ]; then
     API_PROVIDER="ollama"
 else
-    echo "Error: No API key found. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, OLLAMA_MODEL"
+    echo "Error: No API key found. Set one of: OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, OLLAMA_MODEL"
     exit 1
 fi
 
 # Set default models if not configured
 if [ "$API_PROVIDER" = "openai" ] && [ -z "${OPENAI_MODEL:-}" ]; then
     OPENAI_MODEL="gpt-4o-mini"
+fi
+if [ "$API_PROVIDER" = "openrouter" ] && [ -z "${OPENROUTER_MODEL:-}" ]; then
+    OPENROUTER_MODEL="qwen/qwen3-coder:free"
 fi
 if [ "$API_PROVIDER" = "anthropic" ] && [ -z "${ANTHROPIC_MODEL:-}" ]; then
     ANTHROPIC_MODEL="claude-3-5-haiku-20241022"
@@ -200,6 +205,67 @@ EOF
         if [ -n "$COMMAND" ]; then
             # Save working model to config
             echo "OPENAI_MODEL=\"$MODEL\"" > "$CONFIG_FILE"
+            [[ $DEBUG -eq 1 ]] && echo "DEBUG: Saved working model: $MODEL" >&2
+            [[ $DEBUG -eq 1 ]] && echo "DEBUG: Extracted command: $COMMAND" >&2
+            break
+        fi
+    done
+
+elif [ "$API_PROVIDER" = "openrouter" ]; then
+    # Try models in order of preference (cheap to cheaper)
+    OPENROUTER_MODELS=("${OPENROUTER_MODEL}" "qwen/qwen3-coder:free")
+
+    for MODEL in "${OPENROUTER_MODELS[@]}"; do
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Trying OpenRouter model: $MODEL" >&2
+        JSON_PAYLOAD=$(cat <<EOF
+{
+  "model": "$MODEL",
+  "messages": [{"role": "user", "content": "PROMPT_PLACEHOLDER"}],
+  "temperature": 0.1,
+  "max_tokens": 500
+}
+EOF
+)
+        JSON_PAYLOAD="${JSON_PAYLOAD//PROMPT_PLACEHOLDER/$PROMPT_TEXT}"
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Sending request to OpenRouter..." >&2
+        if [ "$HTTP_CLIENT" = "curl" ]; then
+            RESPONSE=$(curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+                -d "$JSON_PAYLOAD")
+        else
+            RESPONSE=$(wget -q -O- \
+                --method=POST \
+                --header="Content-Type: application/json" \
+                --header="Authorization: Bearer ${OPENROUTER_API_KEY}" \
+                --body-data="$JSON_PAYLOAD" \
+                https://openrouter.ai/api/v1/chat/completions)
+        fi
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
+        [[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
+
+        # Check for model-related errors
+        if echo "$RESPONSE" | grep -q '"error"'; then
+            ERROR_CODE=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', {}).get('code', ''))" 2>/dev/null)
+            if [[ "$ERROR_CODE" == "model_not_found" ]] || echo "$RESPONSE" | grep -q "does not exist"; then
+                [[ $DEBUG -eq 1 ]] && echo "DEBUG: Model $MODEL not available, trying next..." >&2
+                continue
+            else
+                echo "Error: API request failed"
+                echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', {}).get('message', data))" 2>/dev/null || echo "$RESPONSE"
+                exit 1
+            fi
+        fi
+
+        if command -v python3 &> /dev/null; then
+            COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['choices'][0]['message']['content'])" 2>/dev/null)
+        else
+            COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        fi
+
+        if [ -n "$COMMAND" ]; then
+            # Save working model to config
+            echo "OPENROUTER_MODEL=\"$MODEL\"" > "$CONFIG_FILE"
             [[ $DEBUG -eq 1 ]] && echo "DEBUG: Saved working model: $MODEL" >&2
             [[ $DEBUG -eq 1 ]] && echo "DEBUG: Extracted command: $COMMAND" >&2
             break
