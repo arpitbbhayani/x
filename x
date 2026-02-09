@@ -2,9 +2,14 @@
 
 set -euo pipefail
 
-# Script directory (for accessing VERSION file)
+# Resolve script directory (used to locate repo files like `VERSION` regardless of cwd).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION_FILE="$SCRIPT_DIR/VERSION"
+
+# --- CLI flags -------------------------------------------------------------
+# Keep flag handling at the top so `x --help/--version/--upgrade` works without
+# requiring any environment variables.
+# --------------------------------------------------------------------------
 
 # Handle --help flag
 if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
@@ -50,7 +55,7 @@ fi
 if [[ "${1:-}" == "--upgrade" ]]; then
 	echo "Upgrading x utility..."
 
-	# Download latest version
+	# Download latest version into a temporary directory.
 	TEMP_DIR=$(mktemp -d)
 	trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -64,12 +69,16 @@ if [[ "${1:-}" == "--upgrade" ]]; then
 		exit 1
 	fi
 
-	# Run installation script
+	# Run installation script.
 	bash "$TEMP_DIR/install.sh"
 
 	echo "Upgrade completed!"
 	exit 0
 fi
+
+# --- Runtime options -------------------------------------------------------
+# `--verbose` enables debug prints to stderr.
+# --------------------------------------------------------------------------
 
 # Enable debug mode if --verbose flag is passed
 DEBUG=0
@@ -78,6 +87,11 @@ if [[ "${1:-}" == "--verbose" ]]; then
 	shift
 fi
 
+# --- Persistent config -----------------------------------------------------
+# `~/.x/config` is a small shell snippet used to remember the last working
+# model per provider (written as KEY="value").
+# --------------------------------------------------------------------------
+
 # Config directory
 CONFIG_DIR="$HOME/.x"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -85,11 +99,20 @@ CONFIG_FILE="$CONFIG_DIR/config"
 # Create config directory if it doesn't exist
 mkdir -p "$CONFIG_DIR"
 
-# Load saved config if exists
+# Load saved config (if present). This may set *_MODEL variables.
 if [ -f "$CONFIG_FILE" ]; then
 	# shellcheck disable=SC1090
 	source "$CONFIG_FILE"
 fi
+
+# --- Provider selection ----------------------------------------------------
+# Pick the first provider that is configured via env vars.
+# Notes:
+# - OpenAI/Anthropic/Gemini require API keys.
+# - LM Studio uses an OpenAI-compatible local HTTP server; a model name is
+#   required but an API key is optional.
+# - Ollama uses its own local HTTP API; a model name is required.
+# --------------------------------------------------------------------------
 
 # Detect which API key is available
 API_PROVIDER=""
@@ -108,7 +131,8 @@ else
 	exit 1
 fi
 
-# Set default models if not configured
+# Set default models if not configured.
+# Users can override these via environment variables or persisted config.
 if [ "$API_PROVIDER" = "openai" ] && [ -z "${OPENAI_MODEL:-}" ]; then
 	OPENAI_MODEL="gpt-4o-mini"
 fi
@@ -118,6 +142,11 @@ fi
 if [ "$API_PROVIDER" = "gemini" ] && [ -z "${GEMINI_MODEL:-}" ]; then
 	GEMINI_MODEL="gemini-2.0-flash-exp"
 fi
+
+# --- Input ----------------------------------------------------------------
+# Everything remaining on the command line is treated as the natural-language
+# instruction sent to the model.
+# --------------------------------------------------------------------------
 
 # Check if instruction is provided
 if [ $# -eq 0 ]; then
@@ -130,10 +159,10 @@ if [ $# -eq 0 ]; then
 	exit 1
 fi
 
-# Combine all arguments into instruction
+# Combine all arguments into a single instruction string.
 INSTRUCTION="$*"
 
-# Detect available HTTP client
+# Detect available HTTP client (we support curl or wget).
 if command -v curl &>/dev/null; then
 	HTTP_CLIENT="curl"
 elif command -v wget &>/dev/null; then
@@ -143,11 +172,21 @@ else
 	exit 1
 fi
 
-# Build system prompt (escape for JSON)
+# Build the prompt text.
+# The model is instructed to return ONLY an executable shell command.
+# NOTE: This is later placed into JSON; it must remain a single string.
 PROMPT_TEXT="You are a shell command generator. Convert the user's natural language instruction into a shell command.\n\nRules:\n- Return ONLY the shell command, nothing else\n- No explanations, no markdown formatting, no code block markers\n- No backticks, no \`\`\`bash\`\`\`, no comments\n- Just the raw executable command(s)\n- Use pipes (|) and operators (&&, ||) as needed\n- If multiple commands are needed, combine them with && or ;\n\nContext:\n- Current directory: $(pwd)\n- Shell: ${SHELL}\n- OS: $(uname -s)\n\nInstruction: ${INSTRUCTION}\n\nCommand:"
 
 [[ $DEBUG -eq 1 ]] && echo "DEBUG: Using API provider: $API_PROVIDER" >&2
 [[ $DEBUG -eq 1 ]] && echo "DEBUG: Instruction: $INSTRUCTION" >&2
+
+# --- Provider implementations ---------------------------------------------
+# Each block:
+# 1) builds a provider-specific JSON payload
+# 2) sends the request via curl/wget
+# 3) extracts the model output into $COMMAND
+# 4) optionally persists the working model to `~/.x/config`
+# --------------------------------------------------------------------------
 
 # Make API request based on provider
 if [ "$API_PROVIDER" = "openai" ]; then
@@ -184,7 +223,8 @@ EOF
 		[[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
 		[[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
 
-		# Check for model-related errors
+		# If the response contains an error, decide whether to fall back to the next
+		# model or exit immediately.
 		if echo "$RESPONSE" | grep -q '"error"'; then
 			ERROR_MSG=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', {}).get('code', ''))" 2>/dev/null)
 			if [[ "$ERROR_MSG" == "model_not_found" ]] || echo "$RESPONSE" | grep -q "does not exist"; then
@@ -197,12 +237,15 @@ EOF
 			fi
 		fi
 
+		# Extract the generated command from JSON.
+		# Prefer python for robust JSON parsing; fallback to a simple sed extraction.
 		if command -v python3 &>/dev/null; then
 			COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['choices'][0]['message']['content'])" 2>/dev/null)
 		else
 			COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 		fi
 
+		# If we got a non-empty command, persist the working model and stop.
 		if [ -n "$COMMAND" ]; then
 			# Save working model to config
 			echo "OPENAI_MODEL=\"$MODEL\"" >"$CONFIG_FILE"
@@ -247,7 +290,8 @@ EOF
 		[[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
 		[[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
 
-		# Check for model-related errors
+		# Model availability/validation errors may be recoverable by trying
+		# the next model.
 		if echo "$RESPONSE" | grep -q '"error"'; then
 			ERROR_TYPE=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', {}).get('type', ''))" 2>/dev/null)
 			if [[ "$ERROR_TYPE" == "invalid_request_error" ]] && echo "$RESPONSE" | grep -q "model"; then
@@ -260,12 +304,13 @@ EOF
 			fi
 		fi
 
-		if command -v python3 &>/dev/null; then
+		# Extract the generated command.
 			COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['content'][0]['text'])" 2>/dev/null)
 		else
 			COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 		fi
 
+		# Persist the working model and stop.
 		if [ -n "$COMMAND" ]; then
 			# Save working model to config
 			echo "ANTHROPIC_MODEL=\"$MODEL\"" >"$CONFIG_FILE"
@@ -313,7 +358,7 @@ EOF
 		[[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
 		[[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
 
-		# Check for model-related errors
+		# Gemini returns errors inside an "error" object.
 		if echo "$RESPONSE" | grep -q '"error"'; then
 			ERROR_CODE=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', {}).get('code', ''))" 2>/dev/null)
 			if [[ "$ERROR_CODE" == "404" ]] || echo "$RESPONSE" | grep -q "not found"; then
@@ -326,12 +371,13 @@ EOF
 			fi
 		fi
 
-		if command -v python3 &>/dev/null; then
+		# Extract the generated command.
 			COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['candidates'][0]['content']['parts'][0]['text'])" 2>/dev/null)
 		else
 			COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 		fi
 
+		# Persist the working model and stop.
 		if [ -n "$COMMAND" ]; then
 			# Save working model to config
 			echo "GEMINI_MODEL=\"$MODEL\"" >"$CONFIG_FILE"
@@ -392,19 +438,21 @@ EOF
 	[[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
 	[[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
 
-	# Check for error in response
+	# Check for error in response.
 	if echo "$RESPONSE" | grep -q '"error"'; then
 		echo "Error: API request failed"
 		echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); err = data.get('error'); print(err.get('message') if isinstance(err, dict) else (err or data))" 2>/dev/null || echo "$RESPONSE"
 		exit 1
 	fi
 
+	# Extract the generated command.
 	if command -v python3 &>/dev/null; then
 		COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['choices'][0]['message']['content'])" 2>/dev/null)
 	else
 		COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 	fi
 
+	# Persist last working LM Studio model.
 	if [ -n "$COMMAND" ]; then
 		echo "LMSTUDIO_MODEL=\"$MODEL\"" >"$CONFIG_FILE"
 		[[ $DEBUG -eq 1 ]] && echo "DEBUG: Saved working model: $MODEL" >&2
@@ -445,13 +493,14 @@ EOF
 	[[ $DEBUG -eq 1 ]] && echo "DEBUG: Response received" >&2
 	[[ $DEBUG -eq 1 ]] && echo "DEBUG: Full response: $RESPONSE" >&2
 
-	# Check for error in response
+	# Check for error in response.
 	if echo "$RESPONSE" | grep -q '"error"'; then
 		echo "Error: API request failed"
 		echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('error', data))" 2>/dev/null || echo "$RESPONSE"
 		exit 1
 	fi
 
+	# Extract the generated command.
 	if command -v python3 &>/dev/null; then
 		COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['message']['content'])" 2>/dev/null)
 	else
@@ -460,10 +509,15 @@ EOF
 fi
 
 if [ -z "$COMMAND" ]; then
+	# If we couldn't extract a command, print the raw response for debugging.
 	echo "Error: Failed to generate command"
 	echo "API Response: $RESPONSE"
 	exit 1
 fi
+
+# --- Execution -------------------------------------------------------------
+# Print the command, ask for confirmation, then execute.
+# --------------------------------------------------------------------------
 
 # Display command and ask for confirmation
 echo "----------"
