@@ -305,6 +305,7 @@ EOF
 		fi
 
 		# Extract the generated command.
+		if command -v python3 &>/dev/null; then
 			COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['content'][0]['text'])" 2>/dev/null)
 		else
 			COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
@@ -372,6 +373,7 @@ EOF
 		fi
 
 		# Extract the generated command.
+		if command -v python3 &>/dev/null; then
 			COMMAND=$(echo "$RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data['candidates'][0]['content']['parts'][0]['text'])" 2>/dev/null)
 		else
 			COMMAND=$(echo "$RESPONSE" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
